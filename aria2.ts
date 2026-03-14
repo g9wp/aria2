@@ -3,90 +3,14 @@
  * 支持 Fetch (HTTP) 与 WebSocket 双通信模式
  */
 
+export * from "./aria2_core.ts";
+import { Aria2ClientCore, type Aria2DownloadStatus, type Aria2GlobalStat, type Aria2Options } from "./aria2_core.ts";
+
 import { getLogger } from "@logtape/logtape";
 const logger = getLogger("aria2");
 // const logger = console;
 
 // --- 1. 类型定义 (Types) ---
-
-export type Aria2Status =
-  | "active"
-  | "waiting"
-  | "paused"
-  | "error"
-  | "complete"
-  | "removed";
-
-export interface Aria2File {
-  index: string;
-  path: string;
-  length: string;
-  completedLength: string;
-  selected: string;
-  uris: Array<{ uri: string; status: "used" | "waiting" }>;
-}
-
-export interface Aria2BTInfo {
-  announceList: string[][];
-  comment?: string;
-  creationDate?: number;
-  mode: "single" | "multi";
-  info: { name: string };
-}
-
-export interface Aria2DownloadStatus {
-  gid: string;
-  status: Aria2Status;
-  totalLength: string;
-  completedLength: string;
-  uploadLength: string;
-  bitfield?: string;
-  downloadSpeed: string;
-  uploadSpeed: string;
-  infoHash?: string;
-  numSeeders?: string;
-  seeder?: string;
-  pieceLength: string;
-  numPieces: string;
-  connections: string;
-  errorCode?: string;
-  errorMessage?: string;
-  followedBy?: string[];
-  following?: string;
-  belongsTo?: string;
-  dir: string;
-  files: Aria2File[];
-  bittorrent?: Aria2BTInfo;
-  verifiedLength?: string;
-  verifyIntegrityPending?: string;
-}
-
-export interface Aria2GlobalStat {
-  downloadSpeed: string;
-  uploadSpeed: string;
-  numActive: string;
-  numWaiting: string;
-  numStopped: string;
-  numStoppedTotal: string;
-}
-
-export interface Aria2Version {
-  version: string;
-  enabledFeatures: string[];
-}
-
-export interface Aria2Options {
-  dir?: string;
-  out?: string;
-  header?: string[];
-  split?: string;
-  "max-connection-per-server"?: string;
-  "user-agent"?: string;
-  "all-proxy"?: string;
-  "max-download-limit"?: string;
-  "max-upload-limit"?: string;
-  [key: string]: any;
-}
 
 export interface Aria2Notification {
   gid: string;
@@ -103,9 +27,7 @@ export type Aria2EventMap = {
 
 // --- 2. 客户端实现 (Client) ---
 
-export class Aria2Client {
-  private secret: string;
-  private httpUrl: string;
+export class Aria2Client extends Aria2ClientCore {
   private wsUrl: string;
   private ws: WebSocket | null = null;
   private listeners: Partial<
@@ -122,18 +44,42 @@ export class Aria2Client {
     }
   >();
 
-  constructor(
-    options?: {
-      host?: string;
-      port?: number;
-      secret?: string;
-      secure?: boolean;
-    },
-  ) {
-    const { host = "localhost", port = 6800, secret = "", secure = false } = options ?? {};
-    this.httpUrl = `${secure ? "https" : "http"}://${host}:${port}/jsonrpc`;
-    this.wsUrl = `${secure ? "wss" : "ws"}://${host}:${port}/jsonrpc`;
-    this.secret = secret;
+  constructor(options?: {
+    host?: string;
+    port?: number;
+    secret?: string;
+    secure?: boolean;
+  }) {
+    super(options);
+
+    this.wsUrl = `${options?.secure ? "wss" : "ws"}://${options?.host ?? "localhost"}:${options?.port ?? 6800}/jsonrpc`;
+
+    const httpPost = this.sendJson;
+
+    // 核心请求方法：优先 WS，失败或未连接则降级 HTTP
+    this.sendJson = (url: string, payload) => {
+      // 优先尝试 WebSocket
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        return new Promise((resolve, reject) => {
+          const id: string = (payload as any).id;
+          // 设置 10 秒超时防止 Promise 挂起
+          const timeout = setTimeout(() => {
+            if (this.pendingRequests.has(id)) {
+              this.pendingRequests.delete(id);
+              reject(new Error("[Aria2] WebSocket Request Timeout"));
+            }
+          }, 10000);
+
+          this.pendingRequests.set(id, { resolve, reject, timeout });
+          logger.trace(`[Aria2] WebSocket send {*}`, { payload });
+          this.ws!.send(JSON.stringify(payload));
+        });
+      }
+
+      // 降级使用 HTTP Fetch
+      logger.trace("[Aria2] HTTP send {*}", { payload });
+      return httpPost(url, payload);
+    };
   }
 
   /**
@@ -179,58 +125,7 @@ export class Aria2Client {
     });
   }
 
-  /**
-   * 核心请求方法：优先 WS，失败或未连接则降级 HTTP
-   */
-  private async request<T>(method: string, params: any[] = []): Promise<T> {
-    const id = crypto.randomUUID();
-    const rpcParams = this.secret ? [`token:${this.secret}`, ...params] : params;
-    const payload = {
-      jsonrpc: "2.0",
-      id,
-      method: `aria2.${method}`,
-      params: rpcParams,
-    };
-
-    // 优先尝试 WebSocket
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      return new Promise((resolve, reject) => {
-        // 设置 10 秒超时防止 Promise 挂起
-        const timeout = setTimeout(() => {
-          if (this.pendingRequests.has(id)) {
-            this.pendingRequests.delete(id);
-            reject(new Error("[Aria2] WebSocket Request Timeout"));
-          }
-        }, 10000);
-
-        this.pendingRequests.set(id, { resolve, reject, timeout });
-        logger.trace("[Aria2] WebSocket send {*}", { payload });
-        this.ws!.send(JSON.stringify(payload));
-      });
-    }
-
-    // 降级使用 HTTP Fetch
-    logger.trace(`[Aria2] HTTP for: ${method}`, { payload });
-    const response = await fetch(this.httpUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const result = await response.json();
-    if (result.error) {
-      throw new Error(
-        `[Aria2 Error] ${result.error.code}: ${result.error.message}`,
-      );
-    }
-    return result.result;
-  }
-
   // === 任务 API ===
-
-  addUri(uris: string[], options: Aria2Options = {}): Promise<string> {
-    return this.request("addUri", [uris, options]);
-  }
 
   pause(gid: string): Promise<string> {
     return this.request("pause", [gid]);
@@ -242,13 +137,6 @@ export class Aria2Client {
 
   remove(gid: string): Promise<string> {
     return this.request("remove", [gid]);
-  }
-
-  tellStatus(
-    gid: string,
-    keys?: (keyof Aria2DownloadStatus)[],
-  ): Promise<Aria2DownloadStatus> {
-    return this.request("tellStatus", keys ? [gid, keys] : [gid]);
   }
 
   tellActive(
@@ -291,10 +179,6 @@ export class Aria2Client {
 
   changeGlobalOption(options: Aria2Options): Promise<string> {
     return this.request("changeGlobalOption", [options]);
-  }
-
-  getVersion(): Promise<Aria2Version> {
-    return this.request("getVersion");
   }
 
   // === 事件订阅 API ===

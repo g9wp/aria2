@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "exports": {
     ".": "./aria2.ts",
-    "./gm": "./aria2_gm.ts"
+    "./gm": "./aria2_gm.ts",
+    "./core": "./aria2_core.ts"
   },
   "tasks": {
     "dev": "deno test --watch"
