@@ -1,7 +1,10 @@
 {
   "name": "@g9wp/aria2",
   "version": "0.1.0",
-  "exports": "./aria2.ts",
+  "exports": {
+    ".": "./aria2.ts",
+    "./gm": "./aria2_gm.ts"
+  },
   "tasks": {
     "dev": "deno test --watch"
   },
