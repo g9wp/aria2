@@ -26,7 +26,7 @@ export class Aria2Client extends Aria2ClientCore {
       ...options,
       postJson: async (url, payload) => {
         console.log(`[Aria2] GM.xmlHttpRequest`, { payload });
-        const response = await GM.xmlHttpRequest({
+        const response = await (globalThis as any).GM.xmlHttpRequest({
           url,
           method: "POST",
           headers: { "Content-Type": "application/json" },
